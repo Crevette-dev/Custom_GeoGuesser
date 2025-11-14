@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Remember where...? — Nolwenn's Game</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    :root{--blue:#2563eb;--muted:#6b7280;--card-bg:#fff}
+    html,body{height:100%;margin:0;font-family:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial}
+    header{background:var(--blue);color:#fff;padding:12px 18px}
+    main{display:flex;flex-wrap:wrap;gap:1rem;padding:1rem}
+    section{background:var(--card-bg);padding:1rem;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+    .controls{flex:1 1 360px;min-width:300px}
+    .mapwrap{flex:2 1 560px;min-width:320px}
+    #map{height:70vh;border-radius:8px}
+    input,button,select{font-size:1rem;padding:.45rem .6rem;margin:.25rem 0;border-radius:6px;border:1px solid #e5e7eb}
+    button{cursor:pointer;background:var(--blue);color:#fff;border:none}
+    button.alt{background:#4b5563}
+    button.danger{background:#dc2626}
+    .small{font-size:.9rem;color:var(--muted)}
+    .hidden{display:none}
+    img.preview{width:100%;height:auto;max-height:500px;object-fit:contain;background:#000}
+    .question-list{max-height:220px;overflow:auto;margin-top:.5rem}
+    .question-item{display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid #f1f5f9}
+    .question-item img{width:56px;height:40px;object-fit:cover;border-radius:6px}
+    .meta{flex:1;cursor:pointer}
+    .trash-btn{background:transparent;border:none;color:#dc2626;cursor:pointer;padding:.2rem .4rem;border-radius:6px}
+    footer{padding:8px 18px;font-size:.85rem;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <header>
+    <h2>🌍 Remember where...? — Nolwenn's Game</h2>
+  </header>
+
+  <main>
+    <section class="controls">
+      <h3 id="mode-title">Setup Mode</h3>
+
+      <div id="setup-mode">
+        <form id="add-form">
+          <label>Image<br><input id="image" type="file" accept="image/*" required></label><br>
+          <label>Title<br><input id="title" placeholder="Optional title"></label><br>
+          <label>Latitude<br><input id="lat" type="number" step="any" required></label><br>
+          <label>Longitude<br><input id="lng" type="number" step="any" required></label><br>
+          <button type="submit">Add Question</button>
+        </form>
+
+        <div style="margin-top:.5rem">
+          <button id="add-demo" class="alt">Add Demo (Eiffel Tower)</button>
+          <button id="clear" class="danger">Clear All Questions</button>
+        </div>
+
+        <p class="small">Questions are saved locally in your browser (localStorage).</p>
+        <div id="question-list" class="question-list"></div>
+      </div>
+
+      <div id="play-mode" class="hidden">
+        <p id="progress" class="small"></p>
+        <div id="image-container"></div>
+        <p><strong>Score:</strong> <span id="score">0</span></p>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <button id="reveal" disabled>Reveal</button>
+          <button id="next" disabled>Next</button>
+          <button id="end" class="alt">End Game</button>
+        </div>
+      </div>
+
+      <hr>
+      <div style="margin-bottom:.5rem;display:flex;align-items:center;gap:.5rem">
+        <label class="small">Base layer:</label>
+        <button id="btn-map" class="alt">Map</button>
+        <button id="btn-sat" class="alt">Satellite</button>
+      </div>
+
+      <button id="switch">Switch to Play Mode</button>
+    </section>
+
+    <section class="mapwrap">
+      <div id="map"></div>
+    </section>
+  </main>
+
+  <footer>Tip: click the map in setup mode to fill the lat/lng and place a draggable marker to fine-tune coordinates.</footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+  /*
+    Cleaned and de-duplicated game script.
+    - Single map click handler that handles both setup and play modes.
+    - Uses FileReader to store images as Data URLs so they persist in localStorage.
+    - Clear separation of UI & logic.
+  */
+
+  // ----- map & base layers -----
+  const map = L.map('map', { worldCopyJump: true }).setView([20,0], 2);
+  const mapLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' });
+  const satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' });
+  mapLayer.addTo(map);
+
+  function setBaseLayer(layer){ if(map.hasLayer(mapLayer)) map.removeLayer(mapLayer); if(map.hasLayer(satLayer)) map.removeLayer(satLayer); layer.addTo(map); }
+  document.getElementById('btn-map').onclick = () => setBaseLayer(mapLayer);
+  document.getElementById('btn-sat').onclick = () => setBaseLayer(satLayer);
+
+  // ----- state -----
+  let mode = 'setup'; // 'setup' or 'play'
+  let questions = JSON.parse(localStorage.getItem('geo_questions') || '[]');
+  let currentIndex = 0;
+  let guessMarker = null, actualMarker = null, connectingLine = null, setupMarker = null;
+  let guess = null;
+  let score = 0;
+
+  // ----- utilities -----
+  function saveQuestions(){ localStorage.setItem('geo_questions', JSON.stringify(questions)); }
+
+  function clampLatLng(lat, lng){
+    if(!isFinite(lat) || !isFinite(lng)) return false;
+    if(lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
+    return true;
+  }
+
+  function readFileAsDataURL(file){
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = rej;
+      fr.readAsDataURL(file);
+    });
+  }
+
+  // Haversine for distance in meters
+  function haversine([a,b],[c,d]){
+    const R = 6371000; const toRad = x => x*Math.PI/180;
+    const dLat = toRad(c-a), dLon = toRad(d-b);
+    const x = Math.sin(dLat/2)**2 + Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+  }
+
+  function scoreFromDist(m){
+    if(m <= 10) return 100;
+    if(m >= 100000) return 1;
+    const p = (100000 - m) / (100000 - 10);
+    return Math.round(1 + p * 99);
+  }
+
+  // ----- render question list (setup) -----
+  function renderQuestionList(){
+    const el = document.getElementById('question-list');
+    if(!el) return;
+    if(!questions.length){ el.innerHTML = '<p class="small">No questions yet.</p>'; return; }
+    el.innerHTML = '';
+
+    questions.forEach((q, idx) => {
+      const div = document.createElement('div'); div.className = 'question-item';
+
+      if(q.image){
+        const thumb = document.createElement('img'); thumb.src = q.image; thumb.alt = q.title || ('Q'+(idx+1));
+        div.appendChild(thumb);
+      }
+
+      const meta = document.createElement('div'); meta.className = 'meta';
+      const latStr = Number.isFinite(q.lat) ? q.lat.toFixed(6) : '—';
+      const lngStr = Number.isFinite(q.lng) ? q.lng.toFixed(6) : '—';
+      meta.textContent = `${q.title || ('Q'+(idx+1))} — ${latStr}, ${lngStr}`;
+
+      // center on map when meta clicked
+      meta.onclick = () => {
+        if(clampLatLng(q.lat, q.lng)) map.setView([q.lat, q.lng], 12);
+      };
+
+      const actions = document.createElement('div');
+      const del = document.createElement('button'); del.className = 'trash-btn'; del.title = 'Delete question'; del.innerHTML = '🗑️';
+      del.onclick = () => {
+        if(confirm(`Delete "${q.title || ('Q'+(idx+1))}"?`)){
+          questions.splice(idx, 1); saveQuestions(); renderQuestionList();
+        }
+      };
+      actions.appendChild(del);
+
+      div.appendChild(meta);
+      div.appendChild(actions);
+      el.appendChild(div);
+    });
+  }
+
+  // ----- progress UI -----
+  function updateProgress(){
+    const p = document.getElementById('progress'); if(!p) return;
+    if(mode === 'play') p.textContent = `Question ${currentIndex+1} of ${questions.length}`; else p.textContent = '';
+  }
+
+  // ----- core play functions -----
+  function clearMapOverlays(){
+    if(guessMarker){ map.removeLayer(guessMarker); guessMarker = null; }
+    if(actualMarker){ map.removeLayer(actualMarker); actualMarker = null; }
+    if(connectingLine){ map.removeLayer(connectingLine); connectingLine = null; }
+  }
+
+  function showQuestion(){
+    clearMapOverlays();
+    const q = questions[currentIndex];
+    document.getElementById('image-container').innerHTML = `<h4>${q.title || ('Q'+(currentIndex+1))}</h4><img class='preview' src='${q.image}' alt='${q.title||"image"}'>`;
+    document.getElementById('reveal').disabled = true;
+    document.getElementById('next').disabled = true;
+    guess = null;
+    map.setView([20,0],2);
+    updateProgress();
+  }
+
+  function startGame(){ currentIndex = 0; score = 0; document.getElementById('score').textContent = score; showQuestion(); updateProgress(); }
+
+  // ----- single map click handler (setup & play) -----
+  map.on('click', e => {
+    // SETUP MODE: fill lat/lng inputs and show draggable marker
+    if(mode === 'setup'){
+      const lat = parseFloat(e.latlng.lat.toFixed(6));
+      const lng = parseFloat(e.latlng.lng.toFixed(6));
+      document.getElementById('lat').value = lat;
+      document.getElementById('lng').value = lng;
+
+      if(!setupMarker){
+        setupMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
+        setupMarker.on('dragend', ev => {
+          const ll = ev.target.getLatLng();
+          document.getElementById('lat').value = parseFloat(ll.lat.toFixed(6));
+          document.getElementById('lng').value = parseFloat(ll.lng.toFixed(6));
+        });
+      } else {
+        setupMarker.setLatLng(e.latlng);
+      }
+      return;
+    }
+
+    // PLAY MODE: set guess marker
+    if(mode !== 'play' || !questions.length) return;
+
+    if(!guessMarker) guessMarker = L.marker(e.latlng).addTo(map);
+    else guessMarker.setLatLng(e.latlng);
+
+    guess = [e.latlng.lat, e.latlng.lng];
+    document.getElementById('reveal').disabled = false;
+  });
+
+  // ----- handlers: reveal / next / end -----
+  document.getElementById('reveal').onclick = () => {
+    if(!guess) return alert('Place a guess on the map first.');
+    const q = questions[currentIndex];
+    const actual = [q.lat, q.lng];
+    const dist = haversine(actual, guess);
+    const pts = scoreFromDist(dist);
+    score += pts; document.getElementById('score').textContent = score;
+
+    actualMarker = L.marker(actual).addTo(map).bindPopup('Actual location').openPopup();
+    connectingLine = L.polyline([guess, actual], { color: 'red' }).addTo(map);
+    map.fitBounds(L.latLngBounds([guess, actual]), { padding: [50,50] });
+
+    // friendly summary
+    alert(`${q.title || ('Q'+(currentIndex+1))}\nDistance: ${(dist/1000).toFixed(2)} km\nPoints: ${pts}`);
+
+    document.getElementById('next').disabled = false;
+    document.getElementById('reveal').disabled = true;
+  };
+
+  document.getElementById('next').onclick = () => {
+    currentIndex++;
+    if(currentIndex >= questions.length){
+      alert('Game over! Total score: ' + score);
+      mode = 'setup'; switchMode();
+    } else {
+      showQuestion();
+    }
+    updateProgress();
+  };
+
+  document.getElementById('end').onclick = () => {
+    if(confirm('End the game and return to setup mode?')){
+      mode = 'setup'; switchMode();
+    }
+  };
+
+  // ----- switch mode -----
+  function switchMode(){
+    if(mode === 'setup'){
+      if(!questions.length){ alert('Add at least one question first!'); return; }
+      mode = 'play';
+      document.getElementById('setup-mode').classList.add('hidden');
+      document.getElementById('play-mode').classList.remove('hidden');
+      document.getElementById('mode-title').textContent = 'Play Mode';
+      document.getElementById('switch').textContent = 'Switch to Setup Mode';
+      if(setupMarker){ map.removeLayer(setupMarker); setupMarker = null; }
+      startGame();
+    } else {
+      mode = 'setup';
+      document.getElementById('setup-mode').classList.remove('hidden');
+      document.getElementById('play-mode').classList.add('hidden');
+      document.getElementById('mode-title').textContent = 'Setup Mode';
+      document.getElementById('switch').textContent = 'Switch to Play Mode';
+      map.setView([20,0],2);
+    }
+    renderQuestionList(); updateProgress();
+  }
+  document.getElementById('switch').onclick = switchMode;
+
+  // ----- add question form -----
+  document.getElementById('add-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const title = document.getElementById('title').value || `Q${questions.length+1}`;
+    const lat = parseFloat(document.getElementById('lat').value);
+    const lng = parseFloat(document.getElementById('lng').value);
+    const file = document.getElementById('image').files[0];
+
+    if(!clampLatLng(lat,lng)) return alert('Please provide valid latitude/longitude.');
+    if(!file) return alert('Please select an image file.');
+
+    try{
+      const dataUrl = await readFileAsDataURL(file);
+      const q = { id: Date.now(), title, lat, lng, image: dataUrl };
+      questions.push(q); saveQuestions();
+      alert('Question added!');
+      e.target.reset();
+      renderQuestionList();
+    }catch(err){ console.error(err); alert('Failed to read image.'); }
+  };
+
+  // ----- add demo & clear -----
+  document.getElementById('add-demo').onclick = () => {
+    const demo = {
+      id: Date.now(), title: 'Eiffel Tower (demo)', lat: 48.8584, lng: 2.2945,
+      image: 'https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg'
+    };
+    questions.push(demo); saveQuestions(); renderQuestionList(); alert('Demo added.');
+  };
+
+  document.getElementById('clear').onclick = () => {
+    if(confirm('Clear all saved questions?')){ questions = []; saveQuestions(); renderQuestionList(); alert('Cleared.'); }
+  };
+
+  // ----- initial render -----
+  renderQuestionList(); updateProgress();
+  </script>
+</body>
+</html>
