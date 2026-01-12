@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Remember where...? — Nolwenn's Game</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    :root{--blue:#2563eb;--muted:#6b7280;--card-bg:#fff}
+    html,body{height:100%;margin:0;font-family:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial}
+    header{background:var(--blue);color:#fff;padding:12px 18px}
+    main{display:flex;flex-wrap:wrap;gap:1rem;padding:1rem}
+    section{background:var(--card-bg);padding:1rem;border-radius:12px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+    .controls{flex:1 1 360px;min-width:300px}
+    .mapwrap{flex:2 1 560px;min-width:320px}
+    #map{height:70vh;border-radius:8px}
+    input,button,select{font-size:1rem;padding:.45rem .6rem;margin:.25rem 0;border-radius:6px;border:1px solid #e5e7eb}
+    button{cursor:pointer;background:var(--blue);color:#fff;border:none}
+    button.alt{background:#4b5563}
+    button.danger{background:#dc2626}
+    .small{font-size:.9rem;color:var(--muted)}
+    .hidden{display:none}
+    img.preview{width:100%;height:auto;max-height:500px;object-fit:contain;background:#000}
+    .question-list{max-height:220px;overflow:auto;margin-top:.5rem}
+    .question-item{display:flex;align-items:center;gap:.5rem;padding:.4rem 0;border-bottom:1px solid #f1f5f9}
+    .question-item img{width:56px;height:40px;object-fit:cover;border-radius:6px}
+    .meta{flex:1;cursor:pointer}
+    .trash-btn{background:transparent;border:none;color:#dc2626;cursor:pointer;padding:.2rem .4rem;border-radius:6px}
+    .album-container{display:flex;flex-direction:column;align-items:center;gap:1rem}
+    .album-image{width:100%;max-width:500px;height:auto;max-height:500px;object-fit:contain;background:#000;border-radius:8px}
+    .album-controls{display:flex;gap:.5rem;align-items:center;justify-content:center}
+    .album-title{text-align:center;font-weight:bold}
+    footer{padding:8px 18px;font-size:.85rem;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <header>
+    <h2>🌍 Remember where...? — Nolwenn's Game</h2>
+  </header>
+
+  <main>
+    <section class="controls">
+      <h3 id="mode-title">Setup Mode</h3>
+
+      <div id="setup-mode">
+        <form id="add-form">
+          <label>Image<br><input id="image" type="file" accept="image/*" required></label><br>
+          <label>Title<br><input id="title" placeholder="Optional title"></label><br>
+          <label>Latitude<br><input id="lat" type="number" step="any" required></label><br>
+          <label>Longitude<br><input id="lng" type="number" step="any" required></label><br>
+          <button type="submit">Add Question</button>
+        </form>
+
+        <div style="margin-top:.5rem">
+          <button id="add-demo" class="alt">Add Demo (Eiffel Tower)</button>
+          <button id="export" class="alt">Export Questions</button>
+          <button id="import-file" class="alt">Import Questions</button>
+          <input id="import-input" type="file" accept=".json" style="display:none">
+          <button id="clear" class="danger">Clear All Questions</button>
+        </div>
+
+        <p class="small">Questions are saved locally in your browser (metadata in localStorage/IndexedDB; images stored separately).</p>
+        <div id="question-list" class="question-list"></div>
+      </div>
+
+      <div id="play-mode" class="hidden">
+        <p id="progress" class="small"></p>
+        <div id="image-container"></div>
+        <p><strong>Score:</strong> <span id="score">0</span></p>
+        <div style="display:flex;gap:.5rem;align-items:center">
+          <button id="reveal" disabled>Reveal</button>
+          <button id="next" disabled>Next</button>
+          <button id="end" class="alt">End Game</button>
+        </div>
+      </div>
+
+      <div id="album-mode" class="hidden">
+        <div class="album-container">
+          <p id="album-progress" class="small"></p>
+          <div class="album-title" id="album-title"></div>
+          <img id="album-image" class="album-image" alt="Album image">
+          <div class="album-controls">
+            <button id="album-prev" class="alt">← Previous</button>
+            <button id="album-next" class="alt">Next →</button>
+          </div>
+        </div>
+      </div>
+
+      <hr>
+      <div style="margin-bottom:.5rem;display:flex;align-items:center;gap:.5rem">
+        <label class="small">Base layer:</label>
+        <button id="btn-map" class="alt">Map</button>
+        <button id="btn-sat" class="alt">Satellite</button>
+      </div>
+
+      <div style="display:flex;gap:.5rem;flex-wrap:wrap">
+        <button id="switch">Switch to Play Mode</button>
+        <button id="album-btn" class="alt">View Album</button>
+      </div>
+    </section>
+
+    <section class="mapwrap">
+      <div id="map"></div>
+    </section>
+  </main>
+
+  <footer>Tip: click the map in setup mode to fill the lat/lng and place a draggable marker to fine-tune coordinates.</footer>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+  /*
+    Cleaned and de-duplicated game script.
+    - Single map click handler that handles both setup and play modes.
+    - Uses FileReader to store images as Data URLs so they persist in localStorage.
+    - Clear separation of UI & logic.
+  */
+
+  // ----- map & base layers -----
+  const map = L.map('map', { worldCopyJump: true }).setView([20,0], 2);
+  const mapLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OpenStreetMap contributors' });
+  const satLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { attribution: 'Tiles © Esri' });
+  mapLayer.addTo(map);
+
+  function setBaseLayer(layer){ if(map.hasLayer(mapLayer)) map.removeLayer(mapLayer); if(map.hasLayer(satLayer)) map.removeLayer(satLayer); layer.addTo(map); }
+  document.getElementById('btn-map').onclick = () => setBaseLayer(mapLayer);
+  document.getElementById('btn-sat').onclick = () => setBaseLayer(satLayer);
+
+  // ----- state -----
+  let mode = 'setup'; // 'setup' or 'play' or 'album'
+  // questions will be loaded asynchronously from IndexedDB or localStorage
+  let questions = [];
+  let currentIndex = 0;
+  let guessMarker = null, actualMarker = null, connectingLine = null, setupMarker = null;
+  let guess = null;
+  let score = 0;
+  let albumIndex = 0;
+  let albumLocationMarker = null;
+
+  // ----- utilities -----
+
+  function clampLatLng(lat, lng){
+    if(!isFinite(lat) || !isFinite(lng)) return false;
+    if(lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
+    return true;
+  }
+
+  function readFileAsDataURL(file){
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = rej;
+      fr.readAsDataURL(file);
+    });
+  }
+
+  // ----- storage helpers (IndexedDB fallback for large data) -----
+  function openDB(){
+    return new Promise((res, rej) => {
+      if(!('indexedDB' in window)) return rej(new Error('IndexedDB not supported'));
+      const req = indexedDB.open('nolwenn_geo_v1', 1);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if(!db.objectStoreNames.contains('kv')) db.createObjectStore('kv');
+        if(!db.objectStoreNames.contains('images')) db.createObjectStore('images');
+      };
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+    });
+  }
+
+  async function idbGet(key){
+    try{
+      const db = await openDB();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction('kv','readonly');
+        const store = tx.objectStore('kv');
+        const r = store.get(key);
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function idbSet(key, value){
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('kv','readwrite');
+      const store = tx.objectStore('kv');
+      const r = store.put(value, key);
+      r.onsuccess = () => res();
+      r.onerror = () => rej(r.error);
+    });
+  }
+
+  // images store helpers: store blobs and retrieve them by key
+  async function idbSetImage(key, blob){
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('images','readwrite');
+      const store = tx.objectStore('images');
+      const r = store.put(blob, key);
+      r.onsuccess = () => res();
+      r.onerror = () => rej(r.error);
+    });
+  }
+
+  async function idbGetImage(key){
+    try{
+      const db = await openDB();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction('images','readonly');
+        const store = tx.objectStore('images');
+        const r = store.get(key);
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    }catch(e){
+      return null;
+    }
+  }
+
+  async function idbDeleteImage(key){
+    try{
+      const db = await openDB();
+      return await new Promise((res, rej) => {
+        const tx = db.transaction('images','readwrite');
+        const store = tx.objectStore('images');
+        const r = store.delete(key);
+        r.onsuccess = () => res();
+        r.onerror = () => rej(r.error);
+      });
+    }catch(e){
+      console.warn('Failed to delete image from IndexedDB', e);
+    }
+  }
+
+  // Try to save to localStorage first (fast), fall back to IndexedDB if quota exceeded
+  async function saveQuestions(){
+    try{
+      const dataStr = JSON.stringify(questions);
+      try{
+        localStorage.setItem('geo_questions', dataStr);
+      }catch(err){
+        // likely quota exceeded — fall back to IndexedDB
+        console.warn('localStorage setItem failed, falling back to IndexedDB', err);
+        try{
+          await idbSet('geo_questions', questions);
+        }catch(idbErr){
+          console.error('Failed to save to IndexedDB as fallback', idbErr);
+          throw idbErr;
+        }
+      }
+    }catch(e){
+      console.error('Failed to save questions', e);
+      throw e;
+    }
+  }
+
+  // Initialize storage: prefer IndexedDB if it already has data, otherwise fall back to localStorage
+  async function initStorage(){
+    // try IndexedDB first
+    if('indexedDB' in window){
+      try{
+        const idbData = await idbGet('geo_questions');
+        if(Array.isArray(idbData)){
+          questions = idbData;
+          // migrate embedded images if present
+          await migrateImagesFromQuestions();
+          return;
+        }
+      }catch(e){
+        console.warn('IndexedDB read failed, will try localStorage', e);
+      }
+    }
+
+    // fallback to localStorage
+    try{
+      const ls = localStorage.getItem('geo_questions');
+      if(ls) questions = JSON.parse(ls);
+      // migrate embedded images if present
+      await migrateImagesFromQuestions();
+    }catch(e){
+      console.warn('localStorage read failed', e);
+    }
+  }
+
+  // convert data URLs in questions to separate image blobs stored in IndexedDB
+  function dataURLtoBlob(dataurl){
+    const arr = dataurl.split(',');
+    const mime = arr[0].match(/:(.*?);/)[1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8 = new Uint8Array(n);
+    while(n--){ u8[n] = bstr.charCodeAt(n); }
+    return new Blob([u8], { type: mime });
+  }
+
+  async function migrateImagesFromQuestions(){
+    if(!Array.isArray(questions) || !('indexedDB' in window)) return;
+    let migrated = false;
+    for(let i=0;i<questions.length;i++){
+      const q = questions[i];
+      if(!q || !q.image || typeof q.image !== 'string') continue;
+      // if image is embedded data URL, move to images store
+      if(q.image.startsWith('data:')){
+        try{
+          const blob = dataURLtoBlob(q.image);
+          const key = `img_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+          await idbSetImage(key, blob);
+          q.image = key;
+          migrated = true;
+        }catch(e){ console.warn('Failed to migrate embedded image', e); }
+      }
+    }
+    if(migrated){
+      try{ await saveQuestions(); }catch(e){ console.warn('Failed to save after migration', e); }
+    }
+  }
+
+  // Haversine for distance in meters
+  function haversine([a,b],[c,d]){
+    const R = 6371000; const toRad = x => x*Math.PI/180;
+    const dLat = toRad(c-a), dLon = toRad(d-b);
+    const x = Math.sin(dLat/2)**2 + Math.cos(toRad(a))*Math.cos(toRad(c))*Math.sin(dLon/2)**2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+  }
+
+  function scoreFromDist(m){
+    if(m <= 10) return 100;
+    if(m >= 100000) return 1;
+    const p = (100000 - m) / (100000 - 10);
+    return Math.round(1 + p * 99);
+  }
+
+  // ----- render question list (setup) -----
+  function renderQuestionList(){
+    const el = document.getElementById('question-list');
+    if(!el) return;
+    if(!questions.length){ el.innerHTML = '<p class="small">No questions yet.</p>'; return; }
+    el.innerHTML = '';
+
+    questions.forEach((q, idx) => {
+      const div = document.createElement('div'); div.className = 'question-item';
+
+      if(q.image){
+        const thumb = document.createElement('img'); thumb.alt = q.title || ('Q'+(idx+1));
+        // data URL or external URL
+        if(typeof q.image === 'string' && q.image.startsWith('data:')){
+          thumb.src = q.image;
+        } else if(typeof q.image === 'string' && (q.image.startsWith('http:') || q.image.startsWith('https:'))){
+          thumb.src = q.image;
+        } else if(typeof q.image === 'string'){
+          // assume it's an image key stored in IndexedDB
+          idbGetImage(q.image).then(blob => {
+            if(blob) thumb.src = URL.createObjectURL(blob);
+            else thumb.alt = '(image missing)';
+          }).catch(() => { thumb.alt = '(image error)'; });
+        }
+        div.appendChild(thumb);
+      }
+
+      const meta = document.createElement('div'); meta.className = 'meta';
+      const latStr = Number.isFinite(q.lat) ? q.lat.toFixed(6) : '—';
+      const lngStr = Number.isFinite(q.lng) ? q.lng.toFixed(6) : '—';
+      meta.textContent = `${q.title || ('Q'+(idx+1))} — ${latStr}, ${lngStr}`;
+
+      // center on map when meta clicked
+      meta.onclick = () => {
+        if(clampLatLng(q.lat, q.lng)) map.setView([q.lat, q.lng], 12);
+      };
+
+      const actions = document.createElement('div');
+      const del = document.createElement('button'); del.className = 'trash-btn'; del.title = 'Delete question'; del.innerHTML = '🗑️';
+      del.onclick = async () => {
+        if(confirm(`Delete "${q.title || ('Q'+(idx+1))}"?`)){
+          // remove associated image blob if it is stored by key
+          try{
+            const imgRef = q.image;
+            if(imgRef && typeof imgRef === 'string' && !imgRef.startsWith('data:') && !imgRef.startsWith('http')){
+              await idbDeleteImage(imgRef);
+            }
+          }catch(e){ console.warn('Failed to delete associated image blob', e); }
+
+          questions.splice(idx, 1);
+          try{ await saveQuestions(); }catch(e){ alert('Failed to persist deletion: '+e.message); }
+          renderQuestionList();
+        }
+      };
+      actions.appendChild(del);
+
+      div.appendChild(meta);
+      div.appendChild(actions);
+      el.appendChild(div);
+    });
+  }
+
+  // ----- progress UI -----
+  function updateProgress(){
+    const p = document.getElementById('progress'); if(!p) return;
+    if(mode === 'play') p.textContent = `Question ${currentIndex+1} of ${questions.length}`; else p.textContent = '';
+  }
+
+  function updateAlbumView(){
+    if(albumIndex < 0 || albumIndex >= questions.length) return;
+    const q = questions[albumIndex];
+    document.getElementById('album-progress').textContent = `Image ${albumIndex+1} of ${questions.length}`;
+    document.getElementById('album-title').textContent = q.title || (`Q${albumIndex+1}`);
+    const albumImg = document.getElementById('album-image');
+    albumImg.src = '';
+    if(q.image && typeof q.image === 'string'){
+      if(q.image.startsWith('data:') || q.image.startsWith('http')){
+        albumImg.src = q.image;
+      } else {
+        idbGetImage(q.image).then(blob => { if(blob) albumImg.src = URL.createObjectURL(blob); else albumImg.alt='(missing)'; }).catch(()=>albumImg.alt='(error)');
+      }
+    }
+    if(clampLatLng(q.lat, q.lng)) {
+      map.setView([q.lat, q.lng], 12);
+      if(albumLocationMarker) map.removeLayer(albumLocationMarker);
+      albumLocationMarker = L.marker([q.lat, q.lng]).addTo(map).bindPopup(q.title || (`Q${albumIndex+1}`));
+    }
+  }
+
+  // ----- core play functions -----
+  function clearMapOverlays(){
+    if(guessMarker){ map.removeLayer(guessMarker); guessMarker = null; }
+    if(actualMarker){ map.removeLayer(actualMarker); actualMarker = null; }
+    if(connectingLine){ map.removeLayer(connectingLine); connectingLine = null; }
+  }
+
+  function showQuestion(){
+    clearMapOverlays();
+    const q = questions[currentIndex];
+    document.getElementById('image-container').innerHTML = `<h4>${q.title || ('Q'+(currentIndex+1))}</h4><img id='current-preview' class='preview' alt='${q.title||"image"}'>`;
+    const preview = document.getElementById('current-preview');
+    if(q.image && typeof q.image === 'string'){
+      if(q.image.startsWith('data:') || q.image.startsWith('http')){
+        preview.src = q.image;
+      } else {
+        idbGetImage(q.image).then(blob => { if(blob) preview.src = URL.createObjectURL(blob); else preview.alt='(missing)'; }).catch(()=> preview.alt='(error)');
+      }
+    }
+    document.getElementById('reveal').disabled = true;
+    document.getElementById('next').disabled = true;
+    guess = null;
+    map.setView([20,0],2);
+    updateProgress();
+  }
+
+  function startGame(){ currentIndex = 0; score = 0; document.getElementById('score').textContent = score; showQuestion(); updateProgress(); }
+
+  // ----- single map click handler (setup & play) -----
+  map.on('click', e => {
+    // SETUP MODE: fill lat/lng inputs and show draggable marker
+    if(mode === 'setup'){
+      const lat = parseFloat(e.latlng.lat.toFixed(6));
+      const lng = parseFloat(e.latlng.lng.toFixed(6));
+      document.getElementById('lat').value = lat;
+      document.getElementById('lng').value = lng;
+
+      if(!setupMarker){
+        setupMarker = L.marker(e.latlng, { draggable: true }).addTo(map);
+        setupMarker.on('dragend', ev => {
+          const ll = ev.target.getLatLng();
+          document.getElementById('lat').value = parseFloat(ll.lat.toFixed(6));
+          document.getElementById('lng').value = parseFloat(ll.lng.toFixed(6));
+        });
+      } else {
+        setupMarker.setLatLng(e.latlng);
+      }
+      return;
+    }
+
+    // PLAY MODE: set guess marker
+    if(mode !== 'play' || !questions.length) return;
+
+    if(!guessMarker) guessMarker = L.marker(e.latlng).addTo(map);
+    else guessMarker.setLatLng(e.latlng);
+
+    guess = [e.latlng.lat, e.latlng.lng];
+    document.getElementById('reveal').disabled = false;
+  });
+
+  // ----- handlers: reveal / next / end -----
+  document.getElementById('reveal').onclick = () => {
+    if(!guess) return alert('Place a guess on the map first.');
+    const q = questions[currentIndex];
+    const actual = [q.lat, q.lng];
+    const dist = haversine(actual, guess);
+    const pts = scoreFromDist(dist);
+    score += pts; document.getElementById('score').textContent = score;
+
+    actualMarker = L.marker(actual).addTo(map).bindPopup('Actual location').openPopup();
+    connectingLine = L.polyline([guess, actual], { color: 'red' }).addTo(map);
+    map.fitBounds(L.latLngBounds([guess, actual]), { padding: [50,50] });
+
+    // friendly summary
+    alert(`${q.title || ('Q'+(currentIndex+1))}\nDistance: ${(dist/1000).toFixed(2)} km\nPoints: ${pts}`);
+
+    document.getElementById('next').disabled = false;
+    document.getElementById('reveal').disabled = true;
+  };
+
+  document.getElementById('next').onclick = () => {
+    currentIndex++;
+    if(currentIndex >= questions.length){
+      alert('Game over! Total score: ' + score);
+      mode = 'setup'; switchMode();
+    } else {
+      showQuestion();
+    }
+    updateProgress();
+  };
+
+  document.getElementById('end').onclick = () => {
+    if(confirm('End the game and return to setup mode?')){
+      mode = 'setup'; switchMode();
+    }
+  };
+
+  // ----- switch mode -----
+  function switchMode(){
+    if(mode === 'setup'){
+      if(!questions.length){ alert('Add at least one question first!'); return; }
+      mode = 'play';
+      document.getElementById('setup-mode').classList.add('hidden');
+      document.getElementById('play-mode').classList.remove('hidden');
+      document.getElementById('album-mode').classList.add('hidden');
+      document.getElementById('mode-title').textContent = 'Play Mode';
+      document.getElementById('switch').textContent = 'Switch to Setup Mode';
+      if(setupMarker){ map.removeLayer(setupMarker); setupMarker = null; }
+      if(albumLocationMarker){ map.removeLayer(albumLocationMarker); albumLocationMarker = null; }
+      startGame();
+    } else {
+      mode = 'setup';
+      document.getElementById('setup-mode').classList.remove('hidden');
+      document.getElementById('play-mode').classList.add('hidden');
+      document.getElementById('album-mode').classList.add('hidden');
+      document.getElementById('mode-title').textContent = 'Setup Mode';
+      document.getElementById('switch').textContent = 'Switch to Play Mode';
+      map.setView([20,0],2);
+      if(albumLocationMarker){ map.removeLayer(albumLocationMarker); albumLocationMarker = null; }
+    }
+    renderQuestionList(); updateProgress();
+  }
+  document.getElementById('switch').onclick = switchMode;
+
+  function enterAlbumMode(){
+    if(!questions.length){ alert('Add at least one question first!'); return; }
+    mode = 'album';
+    albumIndex = 0;
+    document.getElementById('setup-mode').classList.add('hidden');
+    document.getElementById('play-mode').classList.add('hidden');
+    document.getElementById('album-mode').classList.remove('hidden');
+    document.getElementById('mode-title').textContent = 'Album Mode';
+    document.getElementById('switch').textContent = 'Switch to Setup Mode';
+    if(setupMarker){ map.removeLayer(setupMarker); setupMarker = null; }
+    if(albumLocationMarker){ map.removeLayer(albumLocationMarker); albumLocationMarker = null; }
+    updateAlbumView();
+  }
+
+  document.getElementById('album-btn').onclick = enterAlbumMode;
+
+  document.getElementById('album-prev').onclick = () => {
+    if(albumIndex > 0) {
+      albumIndex--;
+      updateAlbumView();
+    }
+  };
+
+  document.getElementById('album-next').onclick = () => {
+    if(albumIndex < questions.length - 1) {
+      albumIndex++;
+      updateAlbumView();
+    }
+  };
+
+  // ----- add question form -----
+  document.getElementById('add-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const title = document.getElementById('title').value || `Q${questions.length+1}`;
+    const lat = parseFloat(document.getElementById('lat').value);
+    const lng = parseFloat(document.getElementById('lng').value);
+    const file = document.getElementById('image').files[0];
+
+    if(!clampLatLng(lat,lng)) return alert('Please provide valid latitude/longitude.');
+    if(!file) return alert('Please select an image file.');
+
+    try{
+      let imageRef;
+      if('indexedDB' in window){
+        // store the file blob in the images store and keep a reference key in the question
+        const key = `img_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+        try{
+          await idbSetImage(key, file);
+          imageRef = key;
+        }catch(e){
+          console.warn('Failed to store image in IndexedDB, falling back to data URL', e);
+          imageRef = await readFileAsDataURL(file);
+        }
+      } else {
+        imageRef = await readFileAsDataURL(file);
+      }
+
+      const q = { id: Date.now(), title, lat, lng, image: imageRef };
+      questions.push(q);
+      await saveQuestions();
+      alert('Question added!');
+      e.target.reset();
+      renderQuestionList();
+    }catch(err){ console.error(err); alert('Failed to read image.'); }
+  };
+
+  // ----- add demo & clear -----
+  document.getElementById('add-demo').onclick = async () => {
+    const demoUrl = 'https://upload.wikimedia.org/wikipedia/commons/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg';
+    let imageRef = demoUrl;
+    if('indexedDB' in window){
+      try{
+        const resp = await fetch(demoUrl);
+        const blob = await resp.blob();
+        const key = `img_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+        await idbSetImage(key, blob);
+        imageRef = key;
+      }catch(e){ console.warn('Failed to fetch/store demo image, using remote URL', e); }
+    }
+    const demo = { id: Date.now(), title: 'Eiffel Tower (demo)', lat: 48.8584, lng: 2.2945, image: imageRef };
+    questions.push(demo);
+    try{ await saveQuestions(); }catch(e){ alert('Failed to persist demo: '+e.message); }
+    renderQuestionList(); alert('Demo added.');
+  };
+
+  document.getElementById('clear').onclick = async () => {
+    if(confirm('Clear all saved questions?')){
+      questions = [];
+      try{ await saveQuestions(); }catch(e){ alert('Failed to clear storage: '+e.message); }
+      renderQuestionList(); alert('Cleared.');
+    }
+  };
+
+  // ----- export / import -----
+  document.getElementById('export').onclick = () => {
+    const dataStr = JSON.stringify(questions, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nolwenn-questions-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  document.getElementById('import-file').onclick = () => {
+    document.getElementById('import-input').click();
+  };
+
+  document.getElementById('import-input').onchange = async (e) => {
+    const file = e.target.files[0];
+    if(!file) return;
+    // If file is large, prefer IndexedDB; if not available, block import and inform the user
+    const largeThreshold = 2 * 1024 * 1024; // 2 MB
+    if(file.size > largeThreshold && !('indexedDB' in window)){
+      alert('This file is large and your browser does not support IndexedDB. Try a smaller file.');
+      return;
+    }
+
+    const fr = new FileReader();
+    fr.onload = async () => {
+      try {
+        const imported = JSON.parse(fr.result);
+        if(!Array.isArray(imported)) throw new Error('Expected an array');
+
+        // If imported questions include embedded data URLs, migrate them into images store
+        if('indexedDB' in window){
+          for(const q of imported){
+            if(q && q.image && typeof q.image === 'string' && q.image.startsWith('data:')){
+              try{
+                const blob = dataURLtoBlob(q.image);
+                const key = `img_${Date.now()}_${Math.random().toString(36).slice(2,8)}`;
+                await idbSetImage(key, blob);
+                q.image = key;
+              }catch(e){ console.warn('Failed to migrate imported embedded image', e); }
+            }
+          }
+        }
+
+        questions = imported;
+        await saveQuestions();
+        renderQuestionList();
+        alert(`Imported ${questions.length} question(s)!`);
+      } catch(err) {
+        console.error(err);
+        alert('Failed to import: ' + err.message);
+      }
+    };
+    fr.readAsText(file);
+  };
+
+  // ----- initial render -----
+  // Initialize storage, then render UI
+  initStorage().then(() => { renderQuestionList(); updateProgress(); }).catch(err => {
+    console.error('Storage init failed', err);
+    renderQuestionList(); updateProgress();
+  });
+  </script>
+</body>
+</html>
